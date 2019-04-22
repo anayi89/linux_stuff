@@ -1,0 +1,28 @@
+# Install the Java Development Kit
+yum install -y java-1.8.0-openjdk-devel
+
+# Enable Jenkins' repository
+curl --silent --location http://pkg.jenkins-ci.org/redhat-stable/jenkins.repo | sudo tee /etc/yum.repos.d/jenkins.repo
+
+# Add the repository to your system
+sudo rpm --import https://jenkins-ci.org/redhat/jenkins-ci.org.key
+
+# Install Jenkins
+yum install jenkins
+
+# Start the Jenkins service
+jenkins_array=('enable' 'start' '--no-pager status')
+for i in ${jenkins_array[@]}
+do
+    systemctl $i jenkins
+done
+
+# If on a remote server, configure the firewall
+firewall_array=('--add-port=8080 --permanent --zone=public'  '--reload' '--list-all')
+for i in ${firewall_array[@]}
+do
+    firewall-cmd $i
+done
+
+# Go to http://localhost:8080
+cat /var/lib/jenkins/secrets/initalAdminPassword

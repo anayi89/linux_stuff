@@ -1,0 +1,146 @@
+#!/bin/sh
+# Install Java.
+cd ~/Downloads
+java_name = "jdk-8u201-linux-x64.rpm"
+curl --insecure --header "Cookie: gpw_e24=http://www.oracle.com/; oraclelicense=accept-securebackup-cookie" -L "https://download.oracle.com/otn-pub/java/jdk/8u201-b09/42970487e3af4f5aa5bca3f542482c60/jdk-8u201-linux-x64.rpm" > $java_name
+yum -y localinstall $java_name
+rm -rf $java_name
+
+# Install Nginx.
+wget http://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+rpm -ivh epel-release-latest-7.noarch.rpm
+yum install -y nginx
+
+# Start Nginx.
+nginx_array=('enable' 'start' '--no-pager status')
+for i in ${nginx_array[@]}
+do
+    systemctl $i nginx
+done
+
+# Configure the firewall.
+fire_array=('--add-service=http --permanent --zone=public' '--add-service=https --permanent --zone=public' '--reload')
+for i in ${fire_array[@]}
+do
+    firewall-cmd $i
+done
+
+# Install the public signing key for Elasticsearch.
+rpm --import http://packages.elastic.co/GPG-KEY-elasticsearch
+
+# Create a Yum repository file for Elasticsearch.
+echo "[elasticsearch-6.x]
+name=Elasticsearch repository for 6.x packages
+baseurl=https://artifacts.elastic.co/packages/6.x/yum
+gpgcheck=1
+gpgkey=https://artifacts.elastic.co/GPG-KEY-elasticsearch
+enabled=1
+autorefresh=1
+type=rpm-md" >> /etc/yum.repos.d/elasticsearch.repo
+
+# Install Elasticsearch.
+yum -y install elasticsearch
+
+# Configure Elasticsearch.
+sed -i "55s/^#//" /etc/elasticsearch/elasticsearch.yml
+sed -i -e "55s/192.168.0.1/localhost/" /etc/elasticsearch/elasticsearch.yml
+
+# Start Elasticsearch.
+elastic_array=('enable' 'start' '--no-pager status')
+for i in ${elastic_array[@]}
+do
+    systemctl $i elasticsearch
+done
+
+# Install Kibana.
+yum -y install kibana
+
+# Start Kibana
+kibana_array=('enable' 'start' '--no-pager status')
+for i in ${kibana_array[@]}
+do
+    systemctl $i kibana
+done
+
+# Configure Kibana
+echo "Create an admin account for Kibana:"
+read -r kibana_admin
+echo "${kibana_admin}:`openssl passwd -apr1`" | tee -a /etc/nginx/htpasswd.users
+
+# Configure Nginx as a reverse proxy server for Kibana.
+echo "server {
+	listen 80;
+
+	server_name ${fqdomain_name} www.${fqdomain_name};
+
+	auth_basic "Restricted Access";
+	auth_basic_user_file /etc/nginx/htpasswd.users;
+	location / {
+		proxy_pass http://localhost:5601;
+		proxy_http_version 1.1;
+		proxy_set_header Upgrade $http_upgrade;
+		proxy_set_header Connection 'upgrade';
+		proxy_set_header Host $host;
+		proxy_cache_bypass $http_upgrade;
+	}
+}" >> /etc/nginx/conf.d/${fqdomain_name}.conf
+
+# Check the Nginx configuration file for syntax errors.
+nginx -t
+
+# Restart Nginx.
+systemctl restart nginx
+
+# Configure a SELinux security policy to permit Nginx to the proxied service.
+setsebool httpd_can_network_connect 1 -P
+
+# Install Logstash.
+yum -y install logstash
+
+# Configure Logstash for Filebeat.
+echo "input {
+  beats {
+    port => 5044
+  }
+}" >> /etc/logstash/conf.d/02-beats-input.conf
+
+# Configure Logstash for Elasticsearch.
+echo "output {
+  elasticsearch {
+    hosts => ["localhost:9200"]
+    manage_template => false
+    index => "%{[@metadata][beat]}-%{[@metadata][version]}-%{+YYYY.MM.dd}"
+  }
+}" >> /etc/logstash/conf.d/30-elasticsearch-output.conf
+
+# Start Logstash.
+log_array=('enable' 'start' '--no-pager status')
+for i in ${log_array[@]}
+do
+    systemctl $i logstash
+done
+
+# Install Filebeat.
+yum install -y filebeat
+
+# Configure Filebeat.
+sed -i "148s/^/#/" /etc/filebeat/filebeat.yml
+sed -i "150s/^/#/" /etc/filebeat/filebeat.yml
+sed -i "161s/^#//" /etc/filebeat/filebeat.yml
+sed -i -e "163s/#//" /etc/filebeat/filebeat.yml
+
+# Enable Filebeat's module.
+filebeat modules enable system
+
+# Load Filebeat's index template into Elasticsearch.
+filebeat setup --template -E output.logstash.enabled=false -E 'output.elasticsearch.hosts=["localhost:9200"]'
+
+# Disable the Logstash output and enable Elasticsearch output.
+filebeat setup -e -E output.logstash.enabled=false -E output.elasticsearch.hosts=['localhost:9200'] -E setup.kibana.host=localhost:5601
+
+# Start Filebeat.
+file_array=('enable' 'start' '--no-pager status')
+for i in ${file_array[@]}
+do
+    systemctl $i filebeat
+done
